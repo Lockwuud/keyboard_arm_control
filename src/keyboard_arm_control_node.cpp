@@ -1,11 +1,11 @@
 #include "keyboard_reader.h"
 #include "rclcpp/rclcpp.hpp"
-#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "control_msgs/msg/joint_jog.hpp"
-#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "piper_msgs/msg/pos_cmd.hpp"
+#include <algorithm>
 #include <iostream>
-#include <map>
+#include <memory>
 #include <string>
 
 class KeyboardArmControl : public rclcpp::Node {
@@ -16,21 +16,34 @@ public:
         this->declare_parameter("max_linear_velocity", 0.1);
         this->declare_parameter("max_angular_velocity", 0.5);
         this->declare_parameter("joint_velocity", 0.3);
+        this->declare_parameter("gripper_min", 0.0);
+        this->declare_parameter("gripper_max", 0.08);
         
         // 获取参数
         control_mode_ = this->get_parameter("control_mode").as_string();
-        max_linear_velocity_ = this->get_parameter("max_linear_velocity").as_double();
-        max_angular_velocity_ = this->get_parameter("max_angular_velocity").as_double();
+        auto max_linear_velocity = this->get_parameter("max_linear_velocity").as_double();
+        auto max_angular_velocity = this->get_parameter("max_angular_velocity").as_double();
         joint_velocity_ = this->get_parameter("joint_velocity").as_double();
+        min_gripper_ = this->get_parameter("gripper_min").as_double();
+        max_gripper_ = this->get_parameter("gripper_max").as_double();
+        this->declare_parameter("linear_step", max_linear_velocity);
+        this->declare_parameter("angular_step", max_angular_velocity);
+        linear_step_ = this->get_parameter("linear_step").as_double();
+        angular_step_ = this->get_parameter("angular_step").as_double();
+        if (min_gripper_ > max_gripper_) {
+            std::swap(min_gripper_, max_gripper_);
+        }
         
         // 创建发布者
-        twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(
-            "/servo_server/delta_twist_cmds", 10);
         joint_pub_ = this->create_publisher<control_msgs::msg::JointJog>(
             "/servo_server/delta_joint_cmds", 10);
         enable_pub_ = this->create_publisher<std_msgs::msg::Bool>("/enable_flag", 10);
-        joint_cmd_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
-            "/joint_states_single", 10);
+        pos_cmd_pub_ = this->create_publisher<piper_msgs::msg::PosCmd>(
+            "pos_cmd", 10);
+        pos_cmd_state_ = piper_msgs::msg::PosCmd();
+        pos_cmd_state_.gripper = std::clamp(0.0, min_gripper_, max_gripper_);
+        pos_cmd_state_.mode1 = 0;
+        pos_cmd_state_.mode2 = 0;
         
         // 初始化键盘监听
         keyboard_reader_ = std::make_unique<KeyboardReader>();
@@ -107,61 +120,43 @@ private:
     void moveLinearX(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        auto msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
-        msg->header.stamp = this->now();
-        msg->header.frame_id = "base_link";
-        msg->twist.linear.x = direction * max_linear_velocity_;
-        twist_pub_->publish(std::move(msg));
+        pos_cmd_state_.x += direction * linear_step_;
+        publishPosCmd();
     }
     
     void moveLinearY(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        auto msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
-        msg->header.stamp = this->now();
-        msg->header.frame_id = "base_link";
-        msg->twist.linear.y = direction * max_linear_velocity_;
-        twist_pub_->publish(std::move(msg));
+        pos_cmd_state_.y += direction * linear_step_;
+        publishPosCmd();
     }
     
     void moveLinearZ(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        auto msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
-        msg->header.stamp = this->now();
-        msg->header.frame_id = "base_link";
-        msg->twist.linear.z = direction * max_linear_velocity_;
-        twist_pub_->publish(std::move(msg));
+        pos_cmd_state_.z += direction * linear_step_;
+        publishPosCmd();
     }
     
     void rotateX(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        auto msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
-        msg->header.stamp = this->now();
-        msg->header.frame_id = "base_link";
-        msg->twist.angular.x = direction * max_angular_velocity_;
-        twist_pub_->publish(std::move(msg));
+        pos_cmd_state_.roll += direction * angular_step_;
+        publishPosCmd();
     }
     
     void rotateY(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        auto msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
-        msg->header.stamp = this->now();
-        msg->header.frame_id = "base_link";
-        msg->twist.angular.y = direction * max_angular_velocity_;
-        twist_pub_->publish(std::move(msg));
+        pos_cmd_state_.pitch += direction * angular_step_;
+        publishPosCmd();
     }
     
     void rotateZ(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        auto msg = std::make_unique<geometry_msgs::msg::TwistStamped>();
-        msg->header.stamp = this->now();
-        msg->header.frame_id = "base_link";
-        msg->twist.angular.z = direction * max_angular_velocity_;
-        twist_pub_->publish(std::move(msg));
+        pos_cmd_state_.yaw += direction * angular_step_;
+        publishPosCmd();
     }
     
     void moveJoint(int joint_num, int direction) {
@@ -174,12 +169,13 @@ private:
         joint_pub_->publish(std::move(msg));
     }
     
-    void controlGripper(double value) {
-        auto msg = std::make_unique<sensor_msgs::msg::JointState>();
-        msg->header.stamp = this->now();
-        msg->name.push_back("gripper");
-        msg->position.push_back(value);
-        joint_cmd_pub_->publish(std::move(msg));
+    void controlGripper(double delta) {
+        pos_cmd_state_.gripper = std::clamp(pos_cmd_state_.gripper + delta, min_gripper_, max_gripper_);
+        publishPosCmd();
+    }
+    
+    void publishPosCmd() {
+        pos_cmd_pub_->publish(pos_cmd_state_);
     }
     
     void enableArm() {
@@ -205,6 +201,7 @@ private:
         std::cout << "  e - 使能机械臂\n";
         std::cout << "  d - 失能机械臂\n";
         std::cout << "笛卡尔空间控制 (末端控制):\n";
+        std::cout << "  平移步长: " << linear_step_ << " m, 旋转步长: " << angular_step_ << " rad\n";
         std::cout << "  w/s - 末端X轴方向移动\n";
         std::cout << "  a/d - 末端Y轴方向移动\n";
         std::cout << "  q/z - 末端Z轴方向移动\n";
@@ -223,15 +220,17 @@ private:
     }
     
     std::unique_ptr<KeyboardReader> keyboard_reader_;
-    rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
     rclcpp::Publisher<control_msgs::msg::JointJog>::SharedPtr joint_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr enable_pub_;
-    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_cmd_pub_;
+    rclcpp::Publisher<piper_msgs::msg::PosCmd>::SharedPtr pos_cmd_pub_;
+    piper_msgs::msg::PosCmd pos_cmd_state_;
     
     std::string control_mode_;
-    double max_linear_velocity_;
-    double max_angular_velocity_;
     double joint_velocity_;
+    double min_gripper_;
+    double max_gripper_;
+    double linear_step_;
+    double angular_step_;
 };
 
 int main(int argc, char** argv) {
