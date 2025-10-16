@@ -83,7 +83,7 @@ private:
         
         // 使能控制
         keyboard_reader_->registerKeyCallback('e', [this]() { enableArm(); });
-        keyboard_reader_->registerKeyCallback('d', [this]() { disableArm(); });
+        keyboard_reader_->registerKeyCallback('c', [this]() { disableArm(); });
         
         // 笛卡尔空间控制（末端控制）
         keyboard_reader_->registerKeyCallback('w', [this]() { moveLinearX(1); });   // 前
@@ -246,7 +246,7 @@ private:
         std::cout << "  h - 显示此帮助信息\n";
         std::cout << "使能控制:\n";
         std::cout << "  e - 使能机械臂\n";
-        std::cout << "  d - 失能机械臂\n";
+        std::cout << "  c - 失能机械臂\n";
         std::cout << "笛卡尔空间控制 (末端控制):\n";
         std::cout << "  平移步长: " << linear_step_ << " m, 旋转步长: " << angular_step_ << " rad\n";
         std::cout << "  w/s - 末端X轴方向移动\n";
