@@ -9,9 +9,11 @@ endif()
 # 查找依赖包[3,5](@ref)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(piper_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 
 # 包含头文件目录
 include_directories(include)
@@ -25,7 +27,7 @@ ament_target_dependencies(keyboard_reader rclcpp)
 add_executable(keyboard_arm_control_node src/keyboard_arm_control_node.cpp)
 # 为主节点设置依赖项[3](@ref)
 ament_target_dependencies(keyboard_arm_control_node 
-  rclcpp control_msgs std_msgs piper_msgs)
+  rclcpp geometry_msgs control_msgs std_msgs piper_msgs tf2)
 # 链接静态库
 target_link_libraries(keyboard_arm_control_node keyboard_reader)
 

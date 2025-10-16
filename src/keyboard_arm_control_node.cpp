@@ -1,12 +1,17 @@
 #include "keyboard_reader.h"
 #include "rclcpp/rclcpp.hpp"
 #include "control_msgs/msg/joint_jog.hpp"
+#include "geometry_msgs/msg/pose.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "piper_msgs/msg/pos_cmd.hpp"
 #include <algorithm>
+#include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 class KeyboardArmControl : public rclcpp::Node {
 public:
@@ -40,10 +45,16 @@ public:
         enable_pub_ = this->create_publisher<std_msgs::msg::Bool>("/enable_flag", 10);
         pos_cmd_pub_ = this->create_publisher<piper_msgs::msg::PosCmd>(
             "pos_cmd", 10);
-        pos_cmd_state_ = piper_msgs::msg::PosCmd();
-        pos_cmd_state_.gripper = std::clamp(0.0, min_gripper_, max_gripper_);
-        pos_cmd_state_.mode1 = 0;
-        pos_cmd_state_.mode2 = 0;
+        {
+            std::lock_guard<std::mutex> lock(pos_cmd_mutex_);
+            pos_cmd_state_ = piper_msgs::msg::PosCmd();
+            pos_cmd_state_.gripper = std::clamp(0.0, min_gripper_, max_gripper_);
+            pos_cmd_state_.mode1 = 0;
+            pos_cmd_state_.mode2 = 0;
+        }
+        end_pose_sub_ = this->create_subscription<geometry_msgs::msg::Pose>(
+            "end_pose", 10,
+            std::bind(&KeyboardArmControl::endPoseCallback, this, std::placeholders::_1));
         
         // 初始化键盘监听
         keyboard_reader_ = std::make_unique<KeyboardReader>();
@@ -120,43 +131,49 @@ private:
     void moveLinearX(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        pos_cmd_state_.x += direction * linear_step_;
-        publishPosCmd();
+        modifyAndPublish([&](piper_msgs::msg::PosCmd& cmd) {
+            cmd.x += direction * linear_step_;
+        });
     }
     
     void moveLinearY(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        pos_cmd_state_.y += direction * linear_step_;
-        publishPosCmd();
+        modifyAndPublish([&](piper_msgs::msg::PosCmd& cmd) {
+            cmd.y += direction * linear_step_;
+        });
     }
     
     void moveLinearZ(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        pos_cmd_state_.z += direction * linear_step_;
-        publishPosCmd();
+        modifyAndPublish([&](piper_msgs::msg::PosCmd& cmd) {
+            cmd.z += direction * linear_step_;
+        });
     }
     
     void rotateX(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        pos_cmd_state_.roll += direction * angular_step_;
-        publishPosCmd();
+        modifyAndPublish([&](piper_msgs::msg::PosCmd& cmd) {
+            cmd.roll += direction * angular_step_;
+        });
     }
     
     void rotateY(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        pos_cmd_state_.pitch += direction * angular_step_;
-        publishPosCmd();
+        modifyAndPublish([&](piper_msgs::msg::PosCmd& cmd) {
+            cmd.pitch += direction * angular_step_;
+        });
     }
     
     void rotateZ(int direction) {
         if (control_mode_ != "cartesian") return;
         
-        pos_cmd_state_.yaw += direction * angular_step_;
-        publishPosCmd();
+        modifyAndPublish([&](piper_msgs::msg::PosCmd& cmd) {
+            cmd.yaw += direction * angular_step_;
+        });
     }
     
     void moveJoint(int joint_num, int direction) {
@@ -170,12 +187,42 @@ private:
     }
     
     void controlGripper(double delta) {
-        pos_cmd_state_.gripper = std::clamp(pos_cmd_state_.gripper + delta, min_gripper_, max_gripper_);
-        publishPosCmd();
+        modifyAndPublish([&](piper_msgs::msg::PosCmd& cmd) {
+            cmd.gripper = std::clamp(cmd.gripper + delta, min_gripper_, max_gripper_);
+        });
     }
     
     void publishPosCmd() {
-        pos_cmd_pub_->publish(pos_cmd_state_);
+        piper_msgs::msg::PosCmd cmd_copy;
+        {
+            std::lock_guard<std::mutex> lock(pos_cmd_mutex_);
+            cmd_copy = pos_cmd_state_;
+        }
+        pos_cmd_pub_->publish(cmd_copy);
+    }
+
+    void modifyAndPublish(const std::function<void(piper_msgs::msg::PosCmd&)>& modifier) {
+        piper_msgs::msg::PosCmd cmd_copy;
+        {
+            std::lock_guard<std::mutex> lock(pos_cmd_mutex_);
+            modifier(pos_cmd_state_);
+            cmd_copy = pos_cmd_state_;
+        }
+        pos_cmd_pub_->publish(cmd_copy);
+    }
+
+    void endPoseCallback(const geometry_msgs::msg::Pose::SharedPtr msg) {
+        tf2::Quaternion q(msg->orientation.x, msg->orientation.y, msg->orientation.z, msg->orientation.w);
+        double roll = 0.0, pitch = 0.0, yaw = 0.0;
+        tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
+        std::lock_guard<std::mutex> lock(pos_cmd_mutex_);
+        pos_cmd_state_.x = msg->position.x;
+        pos_cmd_state_.y = msg->position.y;
+        pos_cmd_state_.z = msg->position.z;
+        pos_cmd_state_.roll = roll;
+        pos_cmd_state_.pitch = pitch;
+        pos_cmd_state_.yaw = yaw;
     }
     
     void enableArm() {
@@ -223,7 +270,9 @@ private:
     rclcpp::Publisher<control_msgs::msg::JointJog>::SharedPtr joint_pub_;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr enable_pub_;
     rclcpp::Publisher<piper_msgs::msg::PosCmd>::SharedPtr pos_cmd_pub_;
+    rclcpp::Subscription<geometry_msgs::msg::Pose>::SharedPtr end_pose_sub_;
     piper_msgs::msg::PosCmd pos_cmd_state_;
+    std::mutex pos_cmd_mutex_;
     
     std::string control_mode_;
     double joint_velocity_;
